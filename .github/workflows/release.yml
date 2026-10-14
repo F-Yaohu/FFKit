@@ -57,32 +57,29 @@ jobs:
       - name: 打包（tools/build.py）
         run: python tools/build.py
 
-      - name: 压缩为 zip
-        shell: pwsh
-        run: |
-          $version = "${{ steps.ver.outputs.version }}"
-          $zip = "FFKit-$version-win64.zip"
-          if (Test-Path $zip) { Remove-Item $zip }
-          Compress-Archive -Path "dist/FFKit" -DestinationPath $zip -CompressionLevel Optimal
-          $mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
-          Write-Host "产物：$zip ($mb MB)"
-          "zip=$zip" >> $env:GITHUB_OUTPUT
-
-      - name: 创建 Release 并上传
+      - name: 压缩并发布 Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.ver.outputs.tag }}
           VERSION: ${{ steps.ver.outputs.version }}
-          ZIP: ${{ steps.ver.outputs.zip }}
         run: |
+          $zip = "FFKit-$env:VERSION-win64.zip"
+          if (Test-Path $zip) { Remove-Item $zip }
+          Compress-Archive -Path "dist/FFKit" -DestinationPath $zip -CompressionLevel Optimal
+          $mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
+          Write-Host "产物：$zip ($mb MB)"
+
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  $zip" | Out-File -FilePath "$zip.sha256" -Encoding ascii
+
           $notes = @"
           ## FFKit $env:VERSION
 
           ffmpeg 的图形化外壳：本地、离线、无广告、轻量。
 
           ### 下载
-          - `$env:ZIP` —— Windows 64 位免安装版，解压后直接运行 `FFKit.exe`
+          - ``$zip`` —— Windows 64 位免安装版，解压后直接运行 `FFKit.exe`
           - Source code (zip / tar.gz) —— 源码，可用 `python main.py` 直接运行
 
           ### 使用前提
@@ -91,10 +88,16 @@ jobs:
 
           SHA256 校验值见下方 Assets 中的同名 `.sha256` 文件。
 
-          > 本包由 GitHub Actions 自动构建，tag 为 `$env:TAG`。
+          > 本包由 GitHub Actions 自动构建，tag 为 ``$env:TAG``。
           "@
           $notes | Out-File -FilePath release-notes.md -Encoding utf8
 
-          gh release create $env:TAG $env:ZIP --title "FFKit $env:VERSION" --notes-file release-notes.md --generate-notes
-          (Get-FileHash $env:ZIP -Algorithm SHA256).Hash.ToLower() | Out-File -FilePath "$env:ZIP.sha256" -Encoding ascii
-          gh release upload $env:TAG "$env:ZIP.sha256" --clobber
+          # tag 已存在（首次运行失败后重跑）则复用该 Release
+          $existing = gh release view $env:TAG --json tagName --jq .tagName 2>$null
+          if ($existing -eq $env:TAG) {
+            gh release upload $env:TAG $zip "$zip.sha256" --clobber
+            gh release edit $env:TAG --title "FFKit $env:VERSION" --notes-file release-notes.md
+          } else {
+            gh release create $env:TAG $zip "$zip.sha256" --title "FFKit $env:VERSION" --notes-file release-notes.md --generate-notes
+          }
+          Write-Host "Release 已发布：$env:TAG"
