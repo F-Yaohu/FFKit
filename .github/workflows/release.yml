@@ -1,0 +1,100 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "手动发布时使用的 tag（例如 v2.0.0）"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  release:
+    name: 构建 Windows 压缩包并发布 Release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 解析版本号
+        id: ver
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag }}"
+          if (-not $tag) { $tag = "${env:GITHUB_REF_NAME}" }
+          if (-not $tag.StartsWith("v")) { throw "tag 必须以 v 开头，实际为：$tag" }
+          $version = $tag.TrimStart("v")
+          "tag=$tag"          >> $env:GITHUB_OUTPUT
+          "version=$version"  >> $env:GITHUB_OUTPUT
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装打包依赖
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: 把版本号写入 app/__init__.py
+        shell: pwsh
+        run: |
+          $p = "app/__init__.py"
+          $c = Get-Content $p -Raw -Encoding UTF8
+          $c = $c -replace '__version__ = "[^"]*"', ('__version__ = "{0}"' -f "${{ steps.ver.outputs.version }}")
+          Set-Content $p -Value $c -Encoding UTF8 -NoNewline
+          Write-Host "版本号 -> ${{ steps.ver.outputs.version }}"
+
+      - name: 运行核心层自检
+        run: python selftest.py
+
+      - name: 打包（tools/build.py）
+        run: python tools/build.py
+
+      - name: 压缩为 zip
+        shell: pwsh
+        run: |
+          $version = "${{ steps.ver.outputs.version }}"
+          $zip = "FFKit-$version-win64.zip"
+          if (Test-Path $zip) { Remove-Item $zip }
+          Compress-Archive -Path "dist/FFKit" -DestinationPath $zip -CompressionLevel Optimal
+          $mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
+          Write-Host "产物：$zip ($mb MB)"
+          "zip=$zip" >> $env:GITHUB_OUTPUT
+
+      - name: 创建 Release 并上传
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          ZIP: ${{ steps.ver.outputs.zip }}
+        run: |
+          $notes = @"
+          ## FFKit $env:VERSION
+
+          ffmpeg 的图形化外壳：本地、离线、无广告、轻量。
+
+          ### 下载
+          - `$env:ZIP` —— Windows 64 位免安装版，解压后直接运行 `FFKit.exe`
+          - Source code (zip / tar.gz) —— 源码，可用 `python main.py` 直接运行
+
+          ### 使用前提
+          本工具是 ffmpeg 的图形化外壳，**需要本机已安装 ffmpeg 并加入 PATH**
+          （下载：https://ffmpeg.org/download.html）。
+
+          SHA256 校验值见下方 Assets 中的同名 `.sha256` 文件。
+
+          > 本包由 GitHub Actions 自动构建，tag 为 `$env:TAG`。
+          "@
+          $notes | Out-File -FilePath release-notes.md -Encoding utf8
+
+          gh release create $env:TAG $env:ZIP --title "FFKit $env:VERSION" --notes-file release-notes.md --generate-notes
+          (Get-FileHash $env:ZIP -Algorithm SHA256).Hash.ToLower() | Out-File -FilePath "$env:ZIP.sha256" -Encoding ascii
+          gh release upload $env:TAG "$env:ZIP.sha256" --clobber
