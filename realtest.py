@@ -37,6 +37,19 @@ FFPROBE = os.path.join(FFDIR, "ffprobe.exe")
 passed: list[bool] = []
 
 
+def _force_utf8_output() -> None:
+    """把标准输出/错误切到 UTF-8。
+
+    Windows 控制台默认编码可能是 GBK 或 cp1252，直接 print 中文与 ✓/✖ 会抛
+    UnicodeEncodeError（GitHub Actions 的 Windows runner 就是 cp1252）。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def check(name: str, ok: bool, detail: str = "") -> None:
     passed.append(ok)
     mark = "✓" if ok else "✖"
@@ -69,6 +82,7 @@ def make_samples(workdir: str) -> dict[str, str]:
 
 
 def main() -> int:
+    _force_utf8_output()
     app = QCoreApplication(sys.argv)
     prober = Prober(FFPROBE)
     builder = CommandBuilder(FFMPEG, prober=prober)

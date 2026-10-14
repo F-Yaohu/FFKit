@@ -35,6 +35,19 @@ FAILED: list[str] = []
 PASSED = 0
 
 
+def _force_utf8_output() -> None:
+    """把标准输出/错误切到 UTF-8。
+
+    Windows 控制台默认编码可能是 GBK 或 cp1252，直接 print 中文与 ✓/✖ 会抛
+    UnicodeEncodeError（GitHub Actions 的 Windows runner 就是 cp1252）。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def check(name: str, condition: bool, detail: str = "") -> None:
     global PASSED
     if condition:
@@ -72,6 +85,7 @@ def fake_info(path: str, audio_only: bool = False, duration: float = 120.0) -> M
 
 
 def main() -> int:
+    _force_utf8_output()
     out_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.join(tempfile.gettempdir(), "ffkit_shots")
     os.makedirs(out_dir, exist_ok=True)
 
