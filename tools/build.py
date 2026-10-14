@@ -115,11 +115,13 @@ def main() -> int:
         "--noconfirm", "--clean", "--onedir", "--windowed",
         "--name", NAME,
         "--icon", str(icon_ascii),
-        "--add-data", f"app{os.pathsep}app",
-        "--add-data", f"assets{os.pathsep}assets",
+        # 路径一律给绝对值：spec 生成在临时目录，相对路径会被按 spec 所在目录解析
+        "--add-data", f"{ROOT / 'app'}{os.pathsep}app",
+        "--add-data", f"{ROOT / 'assets'}{os.pathsep}assets",
         "--distpath", str(ROOT / "dist"),
         "--workpath", str(ROOT / "build"),
-        "--specpath", str(ROOT),
+        # spec 生成到临时目录：避免覆盖仓库里的 FFKit.spec 并写入本机绝对路径
+        "--specpath", str(tmp_dir),
         str(ROOT / "main.py"),
     ]
     print("执行：", " ".join(cmd[:6]), "...")
