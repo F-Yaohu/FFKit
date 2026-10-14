@@ -1,5 +1,9 @@
 # FFKit — ffmpeg 的图形化外壳
 
+[![CI](https://github.com/F-Yaohu/FFKit/actions/workflows/ci.yml/badge.svg)](https://github.com/F-Yaohu/FFKit/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](requirements.txt)
+
 <p align="center">
   <img src="assets/logo-horizontal.png" width="520" alt="FFKit">
 </p>

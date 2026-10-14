@@ -1,0 +1,54 @@
+name: 问题反馈
+description: 报告一个可复现的问题
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么
+      description: 描述你做了什么、期望什么、实际什么
+      placeholder: |
+        1. 打开「剪辑」页，选中 a.mp4
+        2. 期望无损切割后时长 30s
+        3. 实际得到 0s，命令预览是 …
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: FFKit 版本
+      placeholder: "文件 → 关于"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      options:
+        - Windows 11
+        - Windows 10
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: ffmpeg
+    attributes:
+      label: ffmpeg 版本与路径
+      description: 可在「文件 → 首选项」里查看，或执行 ffmpeg -version
+      render: shell
+  - type: textarea
+    id: command
+    attributes:
+      label: 相关命令或日志
+      description: 程序里的「命令预览」内容，或日志区导出的内容
+      render: shell
