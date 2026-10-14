@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# PyInstaller
+build/
+dist/
+*.spec.bak
+
+# Qt / 测试临时产物
+*.tmp
+
+# IDE
+.idea/
+.vscode/
+
+# WorkBuddy 本地工作数据（不上传）
+.workbuddy/

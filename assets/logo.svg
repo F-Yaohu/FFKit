@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img">
+<title>FFKit</title>
+<desc>FFKit 标识：深蓝圆角方块，中心白色播放三角，外圈青绿色进度弧</desc>
+<rect x="16" y="16" width="480" height="480" rx="112" fill="#0C447C"/>
+<path d="M135.8 135.8 A170 170 0 1 0 376.2 135.8" fill="none" stroke="#5DCAA5" stroke-width="22" stroke-linecap="round"/>
+<path d="M206 158 L354 256 L206 354 Z" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="26" stroke-linejoin="round"/>
+</svg>
