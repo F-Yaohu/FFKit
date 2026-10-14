@@ -128,16 +128,23 @@ python realtest.py <ffmpeg目录>   :: 真实媒体全链路 37 项（需要本�
 
 ```bat
 pip install pyinstaller
-pyinstaller --noconfirm --windowed --name FFKit ^
-  --icon "assets\logo.ico" ^
-  --add-data "app;app" --add-data "assets;assets" main.py
+python tools/build.py
 ```
 
-或直接用仓库里配好的 spec（已含 assets 与图标）：
+产物在 `dist/FFKit/FFKit.exe`。
 
-```bat
-pyinstaller --noconfirm FFKit.spec
-```
+> **为什么用 `tools/build.py` 而不是直接 `pyinstaller FFKit.spec`？**
+> PyInstaller 有个坑：`--icon` 指向的 ico 路径**含非 ASCII 字符（例如中文目录）时会静默失败**——
+> 日志照样打印 `Copying icon to EXE`，实际写入的却是它自带的默认图标，很难察觉。
+> `tools/build.py` 会先把 `logo.ico` 复制到 ASCII 临时目录再传给 `--icon`，
+> 并在打包结束后用 Win32 API 读回 exe 的图标像素做校验，确保图标真的是 FFKit 的。
+>
+> 若你的项目路径是纯 ASCII，也可以直接用：
+> ```bat
+> pyinstaller --noconfirm --windowed --name FFKit --icon "assets\logo.ico" ^
+>   --add-data "app;app" --add-data "assets;assets" main.py
+> ```
+> 或 `pyinstaller --noconfirm FFKit.spec`（spec 已含 assets 与图标）。
 
 > 打包后 exe 仍依赖本机 ffmpeg（符合"ffmpeg 图形化外壳"的定位，不内置分发 ffmpeg）。
 > `assets/` 必须随程序分发，否则窗口/任务栏/托盘图标会变成 Qt 默认图标；
@@ -165,7 +172,8 @@ FFKit/
 │   ├── logo-horizontal.png  #   横版位图
 │   └── logo.ico             #   Windows 图标（16~256 多尺寸）
 ├── tools/
-│   └── render_logo.py       # 从 SVG 重新导出 PNG/ICO
+│   ├── render_logo.py       # 从 SVG 重新导出 PNG/ICO
+│   └── build.py             # 一键打包（修正中文路径下 exe 图标失效）
 ├── app/
 │   ├── resources.py         # 资源定位与图标加载（兼容源码/打包两种环境）
 │   ├── config.py            # 配置持久化
