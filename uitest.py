@@ -34,6 +34,10 @@ from app.ui.widgets.inputs import WheelGuard, install_wheel_guard  # noqa: E402
 FAILED: list[str] = []
 PASSED = 0
 
+# 截图文件名用的英文短名（README 里按这个顺序展示，避免中文文件名在
+# GitHub 上显示成转义链接）
+PAGE_SLUGS = ["trim", "merge", "track", "convert", "extract", "compress", "props"]
+
 
 def _force_utf8_output() -> None:
     """把标准输出/错误切到 UTF-8。
@@ -211,7 +215,7 @@ def main() -> int:
             check(f"{title}页输出不覆盖源文件", specs[0].output not in sources,
                   str(specs[0].output))
 
-        shot = os.path.join(out_dir, f"{index + 1}_{title}_dark.png")
+        shot = os.path.join(out_dir, f"{index + 1:02d}-{PAGE_SLUGS[index]}-dark.png")
         window.grab().save(shot)
         check(f"{title}页截图已生成", os.path.isfile(shot), shot)
 
@@ -450,14 +454,14 @@ def main() -> int:
     app.processEvents()
     window.nav.setCurrentRow(0)
     app.processEvents()
-    shot = os.path.join(out_dir, "7_剪辑_light.png")
+    shot = os.path.join(out_dir, "08-trim-light.png")
     window.grab().save(shot)
     check("浅色模式截图已生成", os.path.isfile(shot), shot)
     window.nav.setCurrentRow(2)
     app.processEvents()
-    window.grab().save(os.path.join(out_dir, "8_转换_light.png"))
-    check("浅色模式转换页截图已生成",
-          os.path.isfile(os.path.join(out_dir, "8_转换_light.png")))
+    light_conv = os.path.join(out_dir, "09-convert-light.png")
+    window.grab().save(light_conv)
+    check("浅色模式转换页截图已生成", os.path.isfile(light_conv), light_conv)
     window.apply_theme("dark")
     app.processEvents()
 
