@@ -241,6 +241,10 @@ class FileListGroup(QWidget):
     filesChanged = Signal()
     currentChanged = Signal(str)
     filesDropped = Signal(list)
+    # 超出数量上限时被拒绝（拒绝条数, 当前已有条数, 上限）
+    limitReached = Signal(int, int, int)
+    # 低于数量下限（仅作提示，不阻止添加）
+    underLimit = Signal(int, int)
 
     def __init__(
         self,
@@ -249,12 +253,17 @@ class FileListGroup(QWidget):
         allow_reorder: bool = False,
         hint: str = "把文件或文件夹拖到这里；支持批量",
         height: int = 150,
+        max_files: int = 0,
+        min_files: int = 0,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.allowed_exts = allowed_exts or ALL_MEDIA
         self.allow_reorder = allow_reorder
         self.hint_text = hint
+        # max_files = 0 表示不限；min_files 只用于文案提示
+        self.max_files = max(0, int(max_files or 0))
+        self.min_files = max(0, int(min_files or 0))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -345,13 +354,30 @@ class FileListGroup(QWidget):
         self.currentChanged.emit("")
 
     def add_files(self, files: list[str], silent: bool = False) -> int:
+        # 数量上限：只收下还装得下的部分，多余的明确告知用户
+        # （需求 2：不能批量处理的页要拦住"误传多传"，否则用户以为全部都会跑，
+        #   实际只有第一个被处理，是很典型的"结果与预期不符"）
+        if self.max_files:
+            room = self.max_files - self.list.count()
+            if room <= 0:
+                self.limitReached.emit(len(files), self.list.count(), self.max_files)
+                return 0
+            if len(files) > room:
+                self.limitReached.emit(len(files) - room, self.list.count() + room, self.max_files)
+                files = files[:room]
         added = self.list.add_paths(files)
         if added:
             self._update_count()
             self.list.select_first()
             if not silent:
                 self.filesChanged.emit()
+        elif self.min_files:
+            self.underLimit.emit(self.list.count(), self.min_files)
         return added
+
+    def over_limit(self, total: int) -> bool:
+        """给定批次的合计条数是否超出上限（供拖拽前判断用）。"""
+        return bool(self.max_files) and total > self.max_files
 
     def paths(self) -> list[str]:
         return self.list.paths()
@@ -384,7 +410,10 @@ class FileListGroup(QWidget):
             self.list.setProperty("empty", "true")
         else:
             size = self.list.total_size()
-            self.count_label.setText(f"{total} 个文件 · 合计 {human_size(size)}")
+            text = f"{total} 个文件 · 合计 {human_size(size)}"
+            if self.max_files and total >= self.max_files:
+                text += f"（上限 {self.max_files}）"
+            self.count_label.setText(text)
             self.list.setProperty("empty", "false")
 
     def hint_text_full(self) -> str:

@@ -27,6 +27,7 @@ from ...core.builder import BuildError
 from ...core.paths import AUDIO_EXTS, VIDEO_EXTS
 from ...core.spec import OP_EXTRACT_AUDIO, OP_EXTRACT_FRAME, OP_STRIP_AUDIO, OperationSpec
 from ...core.timeparse import filename_timestamp, format_hms, parse_time_safe
+from ..widgets.audio_bitrate import AudioBitrate
 from .base_page import BasePage
 
 MODES = [
@@ -41,6 +42,13 @@ AUDIO_CONTAINERS = [
     (".mp3", "MP3 (.mp3) — 重编码"),
     (".wav", "WAV (.wav) — 重编码为 PCM"),
     (".flac", "FLAC (.flac) — 无损压缩"),
+]
+
+# 提取音频时的封面来源（需求 4）
+COVER_MODES = [
+    ("none", "不添加封面"),
+    ("start", "取源视频开头画面"),
+    ("custom", "取自定义时间点的画面"),
 ]
 
 STRIP_CONTAINERS = [(".mp4", "MP4 (.mp4)"), (".mkv", "MKV (.mkv)"), (".mov", "MOV (.mov)")]
@@ -79,12 +87,28 @@ class ExtractPage(BasePage):
         self.lbl_audio_row = self._label("输出格式")
         form.addRow(self.lbl_audio_row, self.cb_audio_container)
 
-        self.sp_abitrate = QSpinBox()
-        self.sp_abitrate.setRange(32, 512)
-        self.sp_abitrate.setValue(192)
-        self.sp_abitrate.setSuffix(" kbps")
+        self.sp_abitrate = AudioBitrate(default=192)
         self.lbl_abr_row = self._label("音频码率")
         form.addRow(self.lbl_abr_row, self.sp_abitrate)
+
+        # ---------------- 封面（仅提取音频） ----------------
+        self.cb_cover = QComboBox()
+        for value, label in COVER_MODES:
+            self.cb_cover.addItem(label, value)
+        self.lbl_cover_row = self._label("封面来源")
+        form.addRow(self.lbl_cover_row, self.cb_cover)
+
+        self.ed_cover_time = QLineEdit()
+        self.ed_cover_time.setPlaceholderText("秒数或 00:01:23")
+        self.ed_cover_time.setToolTip("取源视频的这一刻作为封面；批量时每个文件各取各的")
+        self.btn_cover_now = QPushButton("取当前")
+        self.btn_cover_now.setObjectName("Flat")
+        cover_time_row = QHBoxLayout()
+        cover_time_row.addWidget(self.ed_cover_time, 1)
+        cover_time_row.addWidget(self.btn_cover_now)
+        self._cover_time_widget = self.wrap_row(cover_time_row)
+        self.lbl_cover_time_row = self._label("封面时间点")
+        form.addRow(self.lbl_cover_time_row, self._cover_time_widget)
 
         self.cb_strip_container = QComboBox()
         for value, label in STRIP_CONTAINERS:
@@ -147,11 +171,17 @@ class ExtractPage(BasePage):
         self.cb_frame_format.currentIndexChanged.connect(self.schedule_preview)
         self.sp_quality.valueChanged.connect(self.schedule_preview)
         self.sp_max_width.valueChanged.connect(self.schedule_preview)
-        self.sp_abitrate.valueChanged.connect(self.schedule_preview)
+        self.sp_abitrate.changed.connect(self.schedule_preview)
+        self.cb_cover.currentIndexChanged.connect(self._on_cover_changed)
+        self.ed_cover_time.textChanged.connect(self.schedule_preview)
+        # 封面时间点填不合法时不能开始 → 通知主窗口刷新按钮
+        self.ed_cover_time.textChanged.connect(self.runAvailabilityChanged)
+        self.cb_cover.currentIndexChanged.connect(self.runAvailabilityChanged)
         self.ed_time.textChanged.connect(self._on_time_edited)
         self.ed_time.textEdited.connect(self._on_time_manually_edited)
         self.slider.valueChanged.connect(self._on_slider)
         self.btn_now.clicked.connect(self._take_current)
+        self.btn_cover_now.clicked.connect(self._take_current_for_cover)
         self._time_user_edited = False
         self._on_mode_changed()
 
@@ -173,9 +203,11 @@ class ExtractPage(BasePage):
 
         for widget in (self.lbl_audio_row, self.cb_audio_container):
             widget.setVisible(is_audio)
-        for widget in (self.lbl_abr_row, self.sp_abitrate):
+        for widget in (self.lbl_abr_row,):
             widget.setVisible(is_audio)
             widget.setEnabled(is_audio)
+        # 码率是否需要，取决于输出容器（wav/flac 无损）与是否写封面
+        self._sync_bitrate_row()
         for widget in (self.lbl_strip_row, self.cb_strip_container):
             widget.setVisible(is_strip)
         for widget in (self.lbl_time_row, self._time_widget, self.lbl_percent_row,
@@ -183,17 +215,12 @@ class ExtractPage(BasePage):
                        self.lbl_quality_row, self.sp_quality, self.lbl_width_row, self.sp_max_width):
             widget.setVisible(is_frame)
         self.sp_quality.setVisible(is_frame and self.cb_frame_format.currentData() != ".png")
+        self._sync_cover_rows(is_audio)
 
         if is_audio:
-            value = self.cb_audio_container.currentData()
-            text = {
-                ".m4a": "选择 m4a/aac 时，只要源音轨是 AAC 就无损复制（-vn -c:a copy），秒级完成、无音质损失。",
-                ".aac": "选择 m4a/aac 时，只要源音轨是 AAC 就无损复制（-vn -c:a copy），秒级完成、无音质损失。",
-                ".mp3": "选择 mp3 时会用 libmp3lame 重编码，速度取决于时长。",
-                ".wav": "选择 wav 时会重编码为 PCM 16bit，文件体积会显著变大。",
-                ".flac": "选择 flac 时为无损压缩，体积约为 WAV 的一半。",
-            }.get(value, "")
-            self.lbl_behaviour.setText(text)
+            text = self._audio_codec_hint()
+            self.lbl_behaviour.setText(f"{text}\n{self._cover_hint()}" if text
+                                      else self._cover_hint())
         elif is_strip:
             self.lbl_behaviour.setText("去音频使用 -an -c:v copy，视频流不重编码，秒级完成。")
         else:
@@ -204,6 +231,84 @@ class ExtractPage(BasePage):
             self.lbl_behaviour.setText(hint)
             self._sync_default_time()
         self.schedule_preview()
+
+    # ------------------------------------------------------------------
+    # 封面（需求 4）
+    # ------------------------------------------------------------------
+    def _sync_bitrate_row(self) -> None:
+        """音频码率行：只在提取音频 + 输出有损容器时出现。"""
+        is_audio = self._mode() == "audio"
+        container = self.cb_audio_container.currentData() or ".m4a"
+        lossy = container not in (".wav", ".flac")
+        show = is_audio and lossy
+        self.sp_abitrate.setVisible(show)
+        if show:
+            self.sp_abitrate.clear_note()
+        else:
+            self.sp_abitrate.set_visible_controls(False)
+            self.sp_abitrate.set_note(
+                "WAV / FLAC 为无损输出，不存在码率设置；需要控制体积请改用 MP3 或 M4A。"
+            )
+
+    def _cover_mode(self) -> str:
+        return self.cb_cover.currentData() or "none"
+
+    def _sync_cover_rows(self, is_audio: bool) -> None:
+        """封面来源行只在「提取音频」下出现；时间点行只在选了自定义时出现。"""
+        show_source = is_audio
+        self.lbl_cover_row.setVisible(show_source)
+        self.cb_cover.setVisible(show_source)
+        show_time = show_source and self._cover_mode() == "custom"
+        self.lbl_cover_time_row.setVisible(show_time)
+        self._cover_time_widget.setVisible(show_time)
+
+    def _audio_codec_hint(self) -> str:
+        return {
+            ".m4a": "选择 m4a 时，只要源音轨是 AAC 就无损复制（-c:a copy），秒级完成、无音质损失。",
+            ".aac": "选择 aac 时，只要源音轨是 AAC 就无损复制（-c:a copy），秒级完成、无音质损失。",
+            ".mp3": "选择 mp3 时会用 libmp3lame 重编码，速度取决于时长。",
+            ".wav": "选择 wav 时会重编码为 PCM 16bit，文件体积会显著变大。",
+            ".flac": "选择 flac 时为无损压缩，体积约为 WAV 的一半。",
+        }.get(self.cb_audio_container.currentData() or "", "")
+
+    def _on_cover_changed(self) -> None:
+        self._sync_cover_rows(self._mode() == "audio")
+        if self._mode() == "audio":
+            base = self._audio_codec_hint()
+            self.lbl_behaviour.setText(f"{base}\n{self._cover_hint()}" if base else self._cover_hint())
+        self.schedule_preview()
+
+    def _cover_hint(self) -> str:
+        """封面来源的人话说明；顺带把批量语义讲清楚。"""
+        mode = self._cover_mode()
+        if mode == "none":
+            return "封面：不添加。需要封面请切换上面的选项。"
+        if self.cb_audio_container.currentData() == ".wav":
+            return "封面：WAV 格式装不下封面图，执行时会自动改为只提取音频。"
+        info = self.probe(self.current_first())
+        if info is not None and info.ok and not info.has_video:
+            return "封面：当前文件没有画面，无法取封面。"
+        if mode == "start":
+            return "封面：取源视频第 0 秒的画面，批量时每个文件各取自己的开头。"
+        when = self._cover_seconds()
+        base = "封面：取指定时间点的画面，批量时每个文件都按自己的时长检查边界。"
+        if when is None:
+            return base + "（时间点还没填，执行时会报错）"
+        return base + f"（当前 {format_hms(when, ms=True)}）"
+
+    def _cover_seconds(self) -> float | None:
+        value, err = parse_time_safe(self.ed_cover_time.text())
+        if value is None:
+            return None
+        return max(0.0, value)
+
+    def _take_current_for_cover(self) -> None:
+        """把播放器当前时间填进封面时间点。"""
+        if self.preview is None:
+            return
+        seconds = self.preview.position()
+        self.ed_cover_time.setText(format_hms(seconds, ms=True))
+        self.lbl_behaviour.setText(self._cover_hint())
 
     def _sync_default_time(self) -> None:
         if self.ed_time.text().strip():
@@ -262,6 +367,24 @@ class ExtractPage(BasePage):
         self._on_mode_changed()
 
     # ------------------------------------------------------------------
+    def can_run(self) -> tuple[bool, str]:
+        mode = self._mode()
+        if mode == "frame":
+            when, err = parse_time_safe(self.ed_time.text())
+            if err:
+                return False, f"时间点：{err}"
+            if when is None:
+                return False, "请填写要提取的时间点"
+        elif mode == "audio":
+            cover_mode = self._cover_mode()
+            if cover_mode == "custom":
+                when, err = parse_time_safe(self.ed_cover_time.text())
+                if err:
+                    return False, f"封面时间点：{err}"
+                if when is None:
+                    return False, "请填写封面时间点（秒数或 00:01:23）"
+        return True, ""
+
     def build_specs(self) -> list[OperationSpec]:
         paths = self.paths()
         if not paths:
@@ -276,6 +399,11 @@ class ExtractPage(BasePage):
             if when is None:
                 raise BuildError("请填写要提取的时间点")
             ext = self.cb_frame_format.currentData() or ".jpg"
+        else:
+            cover_mode = self._cover_mode()
+            cover_time = self._cover_seconds()
+            if mode == "audio" and cover_mode == "custom" and cover_time is None:
+                raise BuildError("请填写封面时间点（秒数或 00:01:23）")
 
         for src in paths:
             info = self.probe(src)
@@ -285,11 +413,15 @@ class ExtractPage(BasePage):
                 container = self.cb_audio_container.currentData() or ".m4a"
                 suffix = f"audio_{container.lstrip('.')}"
                 out = self.make_output_path(src, suffix, container)
+                params = {"abitrate_k": self.sp_abitrate.value()}
+                if cover_mode != "none":
+                    params["cover_mode"] = cover_mode
+                    params["cover_time"] = cover_time if cover_mode == "custom" else 0.0
                 specs.append(OperationSpec(
                     op=OP_EXTRACT_AUDIO,
                     inputs=[src],
                     output=out,
-                    params={"abitrate_k": self.sp_abitrate.value()},
+                    params=params,
                     label=os.path.basename(src),
                     info=info,
                 ))

@@ -766,6 +766,108 @@ def test_mux_builder() -> None:
             check("多轨：没有任何轨道时报错", True)
 
 
+def test_round3_extras() -> None:
+    """第三轮实测反馈的回归：提取音频封面 / 批量各自取封面 / 无封面保持原样。"""
+    section("第三轮实测反馈（问题 4：提取音频的封面）")
+    from app.core.spec import OP_EXTRACT_AUDIO
+
+    with tempfile.TemporaryDirectory() as tmp:
+        src = os.path.join(tmp, "sample.mp4")
+        open(src, "wb").close()
+        info = make_info(src)
+        builder = CommandBuilder("ffmpeg", StubProber({src: info}))
+
+        def build(ext: str, **params):
+            return builder.build(OperationSpec(
+                op=OP_EXTRACT_AUDIO, inputs=[src],
+                output=os.path.join(tmp, f"out{ext}"),
+                params=params, label="sample", info=info,
+            ))
+
+        # --- 不加封面：仍是单步，命令与改造前一致 ---
+        plain = build(".m4a", cover_mode="none")
+        check("封面：不添加时只跑一步", len(plain.steps) == 1, str(len(plain.steps)))
+        check("封面：不添加时不引用临时图片", ".ffkit_accover" not in joined(plain.steps[0].argv))
+        check("封面：不添加时仍走 -vn", "-vn" in plain.steps[0].argv)
+
+        # --- 取开头画面 ---
+        start = build(".m4a", cover_mode="start", cover_time=0.0)
+        check("封面：取开头时拆成两步", len(start.steps) == 2, str(len(start.steps)))
+        check("封面：第一步是抽帧", "-frames:v" in start.steps[0].argv
+              and "1" in start.steps[0].argv)
+        check("封面：第一步定位到第 0 秒",
+              "-ss" in start.steps[0].argv
+              and start.steps[0].argv[start.steps[0].argv.index("-ss") + 1] == "0")
+        cover_argv = joined(start.steps[1].argv)
+        check("封面：第二步引用抽出的图片", ".ffkit_accover" in cover_argv)
+        check("封面：第二步标记 attached_pic", "attached_pic" in cover_argv)
+        # -vn 会把附加图片流一起禁掉，这是本轮最容易踩的坑
+        check("封面：写封面时不能带 -vn（否则图片流被丢掉）", "-vn" not in start.steps[1].argv)
+        check("封面：只取源文件音轨", "0:a:0" in start.steps[1].argv)
+        check("封面：中间图片会被清理", ".ffkit_accover" in joined(start.steps[1].cleanup or []))
+
+        # --- mp3 走 ID3 ---
+        mp3 = build(".mp3", cover_mode="start", cover_time=0.0)
+        check("封面：mp3 用 ID3 写入", "-id3v2_version" in joined(mp3.steps[1].argv))
+
+        # --- 自定义时间点 ---
+        custom = build(".m4a", cover_mode="custom", cover_time=42.5)
+        check("封面：自定义时间点写进 -ss",
+              custom.steps[0].argv[custom.steps[0].argv.index("-ss") + 1] == "42.5")
+
+        # --- 超出时长：逐文件夹到结尾前，而不是让 ffmpeg 失败 ---
+        short = make_info(src, duration=10.0)
+        builder2 = CommandBuilder("ffmpeg", StubProber({src: short}))
+        capped = builder2.build(OperationSpec(
+            op=OP_EXTRACT_AUDIO, inputs=[src], output=os.path.join(tmp, "cap.m4a"),
+            params={"cover_mode": "custom", "cover_time": 300.0}, label="s", info=short,
+        ))
+        check("封面：时间点超出时长时自动夹到结尾前",
+              "已改为取结尾前一帧" in " ".join(capped.notes), str(capped.notes))
+
+        # --- 源文件没有画面 → 明确报错，不做半成品 ---
+        silent_video = make_info(src, v_codec="", v_width=0, v_height=0)
+        builder3 = CommandBuilder("ffmpeg", StubProber({src: silent_video}))
+        try:
+            builder3.build(OperationSpec(
+                op=OP_EXTRACT_AUDIO, inputs=[src], output=os.path.join(tmp, "nv.m4a"),
+                params={"cover_mode": "start"}, label="s", info=silent_video,
+            ))
+            check("封面：源无画面时报错", False)
+        except BuildError:
+            check("封面：源无画面时报错", True)
+
+        # --- WAV 装不下封面：降级并说明，而不是静默失败 ---
+        wav = build(".wav", cover_mode="start")
+        check("封面：WAV 自动降级为不写封面",
+              any("WAV 格式无法写入封面图" in w for w in wav.warnings), str(wav.warnings))
+
+        # --- 批量：每个 spec 各带各的时间点，互不干扰 ---
+        a = make_info(src, duration=100.0)
+        b = make_info(src, duration=8.0)
+        ja = builder.build(OperationSpec(
+            op=OP_EXTRACT_AUDIO, inputs=[src], output=os.path.join(tmp, "a.m4a"),
+            params={"cover_mode": "custom", "cover_time": 50.0}, label="a", info=a))
+        jb = CommandBuilder("ffmpeg", StubProber({src: b})).build(OperationSpec(
+            op=OP_EXTRACT_AUDIO, inputs=[src], output=os.path.join(tmp, "b.m4a"),
+            params={"cover_mode": "custom", "cover_time": 50.0}, label="b", info=b))
+        check("批量：长文件按自己的时间点取封面",
+              ja.steps[0].argv[ja.steps[0].argv.index("-ss") + 1] == "50")
+        check("批量：短文件自动夹到自己的结尾前",
+              "已改为取结尾前一帧" in " ".join(jb.notes), str(jb.notes))
+        check("批量：两个任务用不同的中间图文件名",
+              ja.steps[0].temp_out != jb.steps[0].temp_out)
+
+        # --- 封面流索引判定与 builder 共用同一份 ---
+        from app.core.prober import cover_stream_index
+        with_cover = make_info(src, streams=[
+            {"codec_type": "video", "codec_name": "h264", "disposition": {}},
+            {"codec_type": "video", "codec_name": "mjpeg", "disposition": {"attached_pic": 1}},
+        ])
+        check("封面：attached_pic 流索引定位正确", cover_stream_index(with_cover) == 1)
+        check("封面：无封面时返回 None", cover_stream_index(make_info(src)) is None)
+
+
 # ---------------------------------------------------------------------------
 def main() -> int:
     _force_utf8_output()
@@ -784,6 +886,7 @@ def main() -> int:
         test_builder(info, stub)
         test_round2_fixes()
         test_mux_builder()
+        test_round3_extras()
         test_validator(info)
         test_proc_decode()
         test_global_error_keywords()

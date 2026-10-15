@@ -33,6 +33,8 @@ class MergePage(BasePage):
     ALLOWED_EXTS = VIDEO_EXTS | AUDIO_EXTS
     FILE_HINT = "拖入多个文件加入合并列表（可拖拽调整顺序）；编码参数不一致会自动降级重编码"
     LIST_HEIGHT = 210
+    # 合并天然是多进一出，但没有"最多几个"的概念，只提示下限
+    MIN_FILES = 2
 
     def _build_params(self, layout: QVBoxLayout) -> None:
         self.add_group_title(layout, "输出设置")

@@ -22,6 +22,7 @@ from app.core.queue import TaskQueue
 from app.core.spec import (
     OP_CONVERT,
     OP_EDIT_METADATA,
+    OP_EXTRACT_AUDIO,
     OP_MERGE,
     OP_MUX,
     OP_SET_COVER,
@@ -335,6 +336,43 @@ def main() -> int:
               f"a={info12.a_codec} v={info12.v_codec}")
         dur12 = info12.duration or 0
         check("mp3 合并时长约等于两段之和", 6.0 < dur12 < 9.0, f"dur={dur12}")
+
+    # ---------- 场景 13：提取音频写入封面（需求 4）----------
+    for tag, ext, mode, when in (("cover_start", ".m4a", "start", 0.0),
+                                 ("cover_custom", ".mp3", "custom", 2.0),
+                                 ("cover_none", ".flac", "none", 0.0)):
+        out13 = os.path.join(outdir, f"audio_{tag}{ext}")
+        s = run([OperationSpec(
+            op=OP_EXTRACT_AUDIO, inputs=[samples["mkv"]], output=out13,
+            params={"cover_mode": mode, "cover_time": when},
+            label=f"audio_{tag}", info=info)])
+        check_common(s, f"提取音频（封面={mode}）执行成功", out13)
+        if not os.path.isfile(out13):
+            continue
+        i13 = prober.get(out13)
+        check(f"音频（{ext}）音轨正常", bool(i13.ok and i13.a_codec),
+              f"a={i13.a_codec}")
+        if mode == "none":
+            check("不添加封面时输出确实没有封面图", not i13.has_cover,
+                  f"attached={i13.attached_pic_count}")
+        else:
+            check(f"音频（{ext}）确实写入了封面图", i13.has_cover,
+                  f"attached={i13.attached_pic_count}")
+
+    # 批量：两个文件各按自己的参数取封面
+    outs14 = []
+    for index, sample in enumerate(("mkv", "mp4")):
+        out14 = os.path.join(outdir, f"batch_{index}.m4a")
+        outs14.append(out14)
+        s = run([OperationSpec(
+            op=OP_EXTRACT_AUDIO, inputs=[samples[sample]], output=out14,
+            params={"cover_mode": "custom", "cover_time": 1.0},
+            label=f"batch_{index}", info=prober.get(samples[sample]))])
+        check_common(s, f"批量封面 {index + 1} 执行成功", out14)
+    for index, out14 in enumerate(outs14):
+        if os.path.isfile(out14):
+            check(f"批量封面 {index + 1} 各自带上了封面",
+                  prober.get(out14).has_cover)
 
     # ---------- 清理 ----------
     drop_temp_files([samples["mkv"], samples["mp4"]])

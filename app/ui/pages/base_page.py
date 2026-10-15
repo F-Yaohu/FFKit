@@ -63,6 +63,11 @@ class BasePage(QWidget):
     ALLOW_REORDER = False
     FILE_HINT = "把文件或文件夹拖到这里；支持批量处理"
     LIST_HEIGHT = 150
+    # 数量约束：MAX_FILES > 0 时列表到上限就拒绝继续添加（需求 2）。
+    # 一次只处理一个文件的页（如轨道页）设 1，避免"以为全都跑了、其实只跑了第一个"。
+    # MIN_FILES 只用于提示文案，不阻止添加。
+    MAX_FILES = 0
+    MIN_FILES = 0
 
     def __init__(self, ctx: AppContext, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -95,7 +100,11 @@ class BasePage(QWidget):
             allow_reorder=self.ALLOW_REORDER,
             hint=self.FILE_HINT,
             height=self.LIST_HEIGHT,
+            max_files=self.MAX_FILES,
+            min_files=self.MIN_FILES,
         )
+        self.files.limitReached.connect(self._on_limit_reached)
+        self.files.underLimit.connect(self._on_under_limit)
         files_layout.addWidget(self.files, 1)
 
         self.info_panel = InfoPanel()
@@ -385,6 +394,40 @@ class BasePage(QWidget):
                 audio_only=bool(info and info.ok and not info.has_video),
             )
         self.schedule_preview()
+
+    def _on_under_limit(self, count: int, minimum: int) -> None:
+        """低于下限只提示，不阻止（用户可能还在慢慢拖）。"""
+        if getattr(self, "_under_limit_shown", None) == count:
+            return
+        self._under_limit_shown = count
+        self._say_limit(
+            f"还需要再添加 {minimum - count} 个文件才能开始（当前 {count} 个）。",
+            "info",
+        )
+
+    def _on_limit_reached(self, rejected: int, kept: int, maximum: int) -> None:
+        """超出上限：明确告诉用户多出来的没被接受，且本次只处理已保留的那些。"""
+        self._under_limit_shown = None
+        if maximum == 1:
+            text = (
+                f"本页一次只处理 1 个主文件，已忽略额外的 {rejected} 个。"
+                "要处理别的文件，先移除当前这个。"
+            )
+        else:
+            text = (
+                f"本页最多处理 {maximum} 个文件，已忽略额外的 {rejected} 个；"
+                f"本次只会处理列表里的 {kept} 个。"
+            )
+        self._say_limit(text, "warn")
+        self.logMessage.emit(text)
+
+    def _say_limit(self, text: str, level: str) -> None:
+        """数量提示的落点：优先走 notice（页面级），否则退回日志。"""
+        label = getattr(self, "notice", None)
+        if label is not None:
+            self.set_notice(text, level)
+        else:
+            self.logMessage.emit(text)
 
     def _on_dropped(self, files: list[str]) -> None:
         self.logMessage.emit(f"拖入 {len(files)} 个文件")

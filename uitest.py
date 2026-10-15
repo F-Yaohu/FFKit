@@ -514,6 +514,165 @@ def main() -> int:
     check("输出目录切换后命令同步更新", new_dir in trim.command_box.command_text(),
           trim.command_box.command_text()[:200])
 
+    # ==================================================================
+    # 第三轮实测反馈（2026-10-15）
+    # ==================================================================
+
+    # ---- 问题 1：属性页选完封面后"开始处理"必须立刻可点 ----
+    props = window.pages[6]
+    window.nav.setCurrentRow(6)
+    app.processEvents()
+    props.files.clear_all()
+    props.add_files([sources[0]])
+    app.processEvents()
+    props.cb_mode.setCurrentIndex(0)          # 封面模式
+    props.edits["title"].clear()
+    props.chk_remove_cover.setChecked(False)
+    props.ed_cover.setText("")
+    app.processEvents()
+    check("属性页未选封面时禁止运行", not window.btn_start.isEnabled(),
+          window.btn_start.toolTip())
+    props.ed_cover.setText(cover_src)          # 模拟"选择图片…"的结果
+    app.processEvents()
+    check("选完封面后开始按钮立刻可用（问题 1）", window.btn_start.isEnabled(),
+          window.btn_start.toolTip())
+    props.ed_cover.setText("")
+    app.processEvents()
+    check("清空封面后开始按钮重新禁用", not window.btn_start.isEnabled())
+
+    # ---- 问题 3：加入文件自动带出属性 ----
+    props.cb_mode.setCurrentIndex(1)          # 元数据模式
+    props._clear_fields()
+    tagged = infos[sources[0]]
+    tagged.tags = {"title": "自动带出的标题", "artist": "某歌手"}
+    props.files.clear_all()
+    props.add_files([sources[0]])
+    app.processEvents()
+    check("加入文件自动带出标题", props.edits["title"].text() == "自动带出的标题",
+          props.edits["title"].text())
+    check("加入文件自动带出艺术家", props.edits["artist"].text() == "某歌手",
+          props.edits["artist"].text())
+    check("带出属性后开始按钮可用", window.btn_start.isEnabled(),
+          window.btn_start.toolTip())
+    props.files.clear_all()
+    app.processEvents()
+
+    # ---- 问题 3：没有内嵌封面时如实说明，不假装有 ----
+    props.add_files([sources[0]])
+    app.processEvents()
+    check("无内嵌封面时给出明确文案",
+          "没有内嵌封面" in props.lbl_thumb.text(), props.lbl_thumb.text())
+
+    # ---- 问题 2：轨道页只收 1 个主文件 ----
+    track = window.pages[2]
+    window.nav.setCurrentRow(2)
+    app.processEvents()
+    check("轨道页声明只收 1 个主文件", track.MAX_FILES == 1, str(track.MAX_FILES))
+    track.files.clear_all()
+    added = track.add_files(sources)          # 传 3 个
+    app.processEvents()
+    check("轨道页超出的文件被拒收", len(track.paths()) == 1, str(len(track.paths())))
+    check("轨道页告知用户忽略了额外文件",
+          "已忽略额外的 2 个" in window.log_panel.text()
+          or "已忽略额外的 2 个" in track.lbl_hint.text(),
+          window.log_panel.text()[-160:])
+    track.files.clear_all()
+    app.processEvents()
+
+    # ---- 问题 4：提取页封面选项与命令联动 ----
+    extract = window.pages[4]
+    window.nav.setCurrentRow(4)
+    app.processEvents()
+    extract.files.clear_all()
+    extract.add_files([sources[0], sources[1]])   # 批量：两个文件
+    app.processEvents()
+    check("提取页提供「取源视频开头画面」",
+          extract.cb_cover.findData("start") >= 0)
+    check("提取页提供「取自定义时间点」",
+          extract.cb_cover.findData("custom") >= 0)
+    extract.cb_cover.setCurrentIndex(extract.cb_cover.findData("start"))
+    extract.refresh_now()
+    app.processEvents()
+    specs = extract.build_specs()
+    check("选封面后每个文件各自生成任务", len(specs) == 2, str(len(specs)))
+    check("批量任务逐个带上封面参数",
+          all(s.params.get("cover_mode") == "start" for s in specs),
+          str([s.params for s in specs]))
+    cmd = extract.command_box.command_text()
+    check("封面命令抽帧", "-frames:v" in cmd, cmd[:200])
+    check("封面命令写 attached_pic", "attached_pic" in cmd, cmd[:240])
+    extract.cb_cover.setCurrentIndex(extract.cb_cover.findData("custom"))
+    app.processEvents()
+    blocked, reason = extract.can_run()
+    check("自定义封面时间点为空时禁止运行", not blocked, reason)
+    extract.ed_cover_time.setText("00:00:07")
+    app.processEvents()
+    allowed, _ = extract.can_run()
+    check("填好封面时间点后允许运行", allowed)
+    specs = extract.build_specs()
+    check("封面时间点进入任务参数",
+          all(s.params.get("cover_time") == 7.0 for s in specs),
+          str([s.params for s in specs]))
+    extract.cb_cover.setCurrentIndex(extract.cb_cover.findData("none"))
+    extract.refresh_now()
+    app.processEvents()
+    check("关闭封面后命令回到单步且不带图片",
+          ".ffkit_accover" not in extract.command_box.command_text(),
+          extract.command_box.command_text()[:200])
+    extract.files.clear_all()
+    app.processEvents()
+
+    # ---- 问题 5：音频码率改为标准档位 + 人话说明 ----
+    conv = window.pages[3]
+    window.nav.setCurrentRow(3)
+    app.processEvents()
+    conv.files.clear_all()
+    conv.add_files([sources[0]])
+    app.processEvents()
+    labels = [conv.sp_abitrate.cb_preset.itemText(i)
+              for i in range(conv.sp_abitrate.cb_preset.count())]
+    check("码率提供标准档位", any("128" in t for t in labels), str(labels[:3]))
+    check("码率档位带用途说明", any("语音" in t or "标准" in t for t in labels), str(labels[:2]))
+    check("码率提供自定义项",
+          conv.sp_abitrate.cb_preset.findData("custom") >= 0)
+    check("码率默认落在标准档位上",
+          conv.sp_abitrate.cb_preset.currentData() in (96, 128, 160, 192, 256, 320),
+          str(conv.sp_abitrate.cb_preset.currentData()))
+    check("码率有体积估算说明", "MB" in conv.sp_abitrate.lbl_note.text(),
+          conv.sp_abitrate.lbl_note.text())
+    conv.sp_abitrate.set_value(128)
+    conv.refresh_now()
+    app.processEvents()
+    check("选档位后命令使用该码率", "-b:a 128k" in conv.command_box.command_text(),
+          conv.command_box.command_text()[:240])
+    conv.sp_abitrate.set_value(320)
+    conv.refresh_now()
+    app.processEvents()
+    check("切换档位后命令同步", "-b:a 320k" in conv.command_box.command_text(),
+          conv.command_box.command_text()[:240])
+    conv.sp_abitrate.set_value(192)
+
+    # 选 FLAC 时码率没有意义 → 收起控件但说清原因
+    flac_index = conv.cb_container.findData(".flac")
+    if flac_index >= 0:
+        conv.cb_container.setCurrentIndex(flac_index)
+        app.processEvents()
+        check("输出 FLAC 时收起码率控件",
+              not conv.sp_abitrate.cb_preset.isVisibleTo(conv),
+              conv.sp_abitrate.cb_preset.isVisibleTo(conv))
+        check("输出 FLAC 时说明为什么不需要码率",
+              "无损" in conv.sp_abitrate.lbl_note.text(),
+              conv.sp_abitrate.lbl_note.text())
+        conv.cb_container.setCurrentIndex(conv.cb_container.findData(".mp4"))
+        app.processEvents()
+
+    extract = window.pages[4]
+    window.nav.setCurrentRow(4)
+    app.processEvents()
+    check("提取页也用标准码率档位",
+          extract.sp_abitrate.cb_preset.currentData() in (96, 128, 160, 192, 256, 320),
+          str(extract.sp_abitrate.cb_preset.currentData()))
+
     print("\n" + "=" * 60)
     if FAILED:
         print(f"GUI 冒烟测试：{PASSED} 项通过，{len(FAILED)} 项失败")

@@ -65,6 +65,9 @@ class TrackPage(BasePage):
     ALLOW_REORDER = False
     FILE_HINT = "只放一个主文件（视频或音频）；外部音轨/字幕在下方添加"
     LIST_HEIGHT = 110
+    # 本页一次只封装一个主文件：多传的文件以前只是被静默忽略，
+    # 用户以为"一次处理了全部"，实际只跑了当前选中那个（需求 2）。
+    MAX_FILES = 1
 
     # ------------------------------------------------------------------
     def _build_params(self, layout: QVBoxLayout) -> None:
@@ -164,10 +167,9 @@ class TrackPage(BasePage):
             self.track_table.setItem(row, 2, QTableWidgetItem(track.title))
         if not self.track_table.rowCount():
             self.lbl_hint.setText("该文件没有可封装的轨道。")
-        elif len(self.paths()) > 1:
+        else:
             self.lbl_hint.setText(
-                f"轨道页一次只封装一个主文件，本次处理当前选中的「{os.path.basename(path)}」，"
-                "其余文件不会被执行；切换左侧选中项即可编辑它的轨道表。"
+                "本页一次只封装一个主文件；切换左侧选中项即可编辑它的轨道表。"
             )
         self._refresh_summary()
 

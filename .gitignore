@@ -12,6 +12,10 @@ dist/
 
 # Qt / 测试临时产物
 *.tmp
+.realtest_tmp/
+
+# 排出的封面缩略图（属性页自动导出，落在系统临时目录，不入库）
+.ffkit_cover/
 
 # IDE
 .idea/

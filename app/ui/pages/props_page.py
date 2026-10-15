@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
@@ -104,6 +105,15 @@ class PropsPage(BasePage):
         self.lbl_thumb_row = _right_label("预览")
         cover_form.addRow(self.lbl_thumb_row, self.lbl_thumb)
 
+        self.btn_keep_cover = QPushButton("沿用文件里的原封面")
+        self.btn_keep_cover.setObjectName("Flat")
+        self.btn_keep_cover.setToolTip(
+            "把当前文件内嵌的封面直接沿用到输出文件（音视频流无损复制，不重新编码）"
+        )
+        self.btn_keep_cover.setVisible(False)
+        self._keep_cover_row = _right_label("原封面")
+        cover_form.addRow(self._keep_cover_row, self.btn_keep_cover)
+
         self.chk_remove_cover = QCheckBox("改为「移除已有封面」")
         self.chk_remove_cover.setToolTip("勾选后不写新封面，而是把文件里已有的封面图删掉")
         cover_form.addRow("", self.chk_remove_cover)
@@ -160,6 +170,7 @@ class PropsPage(BasePage):
         # ---------------- 信号 ----------------
         self.cb_mode.currentIndexChanged.connect(self._on_mode_changed)
         self.btn_pick_cover.clicked.connect(self._pick_cover)
+        self.btn_keep_cover.clicked.connect(self._keep_existing_cover)
         self.chk_remove_cover.toggled.connect(self._on_cover_toggled)
         self.cb_container.currentIndexChanged.connect(self.schedule_preview)
         self.btn_read.clicked.connect(self._read_current_tags)
@@ -167,13 +178,45 @@ class PropsPage(BasePage):
         for edit in self.edits.values():
             edit.textChanged.connect(self.schedule_preview)
         self.chk_clear_empty.toggled.connect(self.schedule_preview)
+        # 封面路径框也要刷新命令预览：选图 / 清空都会体现在命令里
+        self.ed_cover.textChanged.connect(self.schedule_preview)
+        # 缩略图跟着路径走——不管路径是"选择图片"还是"沿用原封面"设进来的
+        self.ed_cover.textChanged.connect(self._on_cover_path_changed)
         # 这些输入会改变 can_run() 的结论 → 通知主窗口刷新"开始"按钮
         self.cb_mode.currentIndexChanged.connect(self.runAvailabilityChanged)
         self.chk_remove_cover.toggled.connect(self.runAvailabilityChanged)
         self.chk_clear_empty.toggled.connect(self.runAvailabilityChanged)
+        # 少了这一行，选完封面后 ed_cover 的 textChanged 只走预览刷新，
+        # 主窗口的"开始处理"按钮要等下一次别的操作才解禁（实测 bug）
+        self.ed_cover.textChanged.connect(self.runAvailabilityChanged)
         for edit in self.edits.values():
             edit.textChanged.connect(self.runAvailabilityChanged)
+            # 用户亲手改过的字段不再被"自动带出"覆盖
+            edit.textEdited.connect(self._mark_meta_touched)
+        self._meta_touched = False
+        self._existing_cover = ""
+        self._cover_token = 0
         self._on_mode_changed()
+
+    def _mark_meta_touched(self) -> None:
+        self._meta_touched = True
+
+    def _on_cover_path_changed(self, _text: str) -> None:
+        """封面路径变化 → 立即更新预览，不去触发耗时的原封面导出。"""
+        path = self.ed_cover.text().strip()
+        if path and os.path.isfile(path):
+            self._show_cover_thumb(path)
+        elif path:
+            self.lbl_thumb.setText("选中的图片已不存在")
+        else:
+            # 清空后回落到"文件里有没有封面"的判断
+            info = self.probe(self.current_first())
+            if info is not None and info.ok and info.has_cover:
+                self.lbl_thumb.setText("正在读取原封面…")
+                self._request_existing_cover(self.current_first())
+            else:
+                self.lbl_thumb.setText("尚无封面")
+        self._sync_keep_cover_button()
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -186,6 +229,8 @@ class PropsPage(BasePage):
                        self.lbl_thumb, self.chk_remove_cover, self.lbl_container_row,
                        self.cb_container):
             widget.setVisible(cover)
+        # 「原封面」这一行连标签带按钮一起收，不能只藏按钮（否则左侧留个空标签）
+        self._sync_keep_cover_button()
         pic_row = self.ed_cover.parentWidget()
         if pic_row is not None:
             pic_row.setVisible(cover)
@@ -198,16 +243,59 @@ class PropsPage(BasePage):
         self._buttons_widget.setVisible(not cover)
 
         self._on_cover_toggled()
-        self.lbl_hint.setText(
-            "封面与属性都用无损方式写入（-c copy）：只改文件头，音视频流不重编码。"
-        )
+        self._set_mode_hint()
+        self._sync_batch_notice()
         self.schedule_preview()
+
+    def _sync_batch_notice(self) -> None:
+        """批量 + 元数据模式：提醒"带出的值会原样写进所有文件"。
+
+        切模式时也要重算——用户可能在加完文件之后才从封面模式切到属性模式。
+        """
+        count = len(self.paths())
+        if count > 1 and (self.cb_mode.currentData() or "cover") == "meta":
+            self.set_notice(
+                f"已带出第 1 个文件的属性，这一份会原样写入全部 {count} 个文件；"
+                "需要每个文件填不同内容时，请逐个选中并修改。",
+                "warn",
+            )
+        else:
+            self.set_notice("", "info")
 
     def _on_cover_toggled(self) -> None:
         remove = self.chk_remove_cover.isChecked()
         for widget in (self.ed_cover, self.btn_pick_cover, self.lbl_thumb):
             widget.setEnabled(not remove)
+        self._sync_keep_cover_button()
         self.schedule_preview()
+
+    def _show_cover_thumb(self, image_path: str, caption: str = "") -> None:
+        """显示封面缩略图（可以是用户选的图，也可以是从文件里导出的原封面）。"""
+        if not image_path or not os.path.isfile(image_path):
+            self.lbl_thumb.setText(caption or "尚无封面")
+            return
+        pixmap = QPixmap(image_path)
+        if pixmap.isNull():
+            self.lbl_thumb.setText("无法预览该图片")
+            return
+        self.lbl_thumb.setPixmap(
+            pixmap.scaled(180, 96, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        )
+
+    def _sync_keep_cover_button(self) -> None:
+        """「沿用原封面」只在封面模式、未勾移除、且确实导出了原图时可用。
+
+        标签与按钮必须一起显隐——QFormLayout 里的标签是独立控件，
+        只藏按钮会在左边留一个没有内容的空标签。
+        """
+        usable = (
+            (self.cb_mode.currentData() or "cover") == "cover"
+            and not self.chk_remove_cover.isChecked()
+            and bool(getattr(self, "_existing_cover", ""))
+        )
+        self._keep_cover_row.setVisible(usable)
+        self.btn_keep_cover.setVisible(usable)
+        self.btn_keep_cover.setEnabled(usable)
 
     def _pick_cover(self) -> None:
         start = os.path.dirname(self.ed_cover.text()) if self.ed_cover.text() else ""
@@ -217,17 +305,124 @@ class PropsPage(BasePage):
         )
         if not path:
             return
+        # 缩略图由 ed_cover.textChanged → _on_cover_path_changed 统一刷新
         self.ed_cover.setText(path)
-        pixmap = QPixmap(path)
-        if pixmap.isNull():
-            self.lbl_thumb.setText("无法预览该图片")
+
+    def _keep_existing_cover(self) -> None:
+        """沿用当前文件内嵌的封面：把导出的临时图当作封面来源写入。"""
+        path = getattr(self, "_existing_cover", "")
+        if not path:
+            self.lbl_hint.setText("当前文件没有内嵌封面，无法沿用。")
+            return
+        self.chk_remove_cover.setChecked(False)
+        self.ed_cover.setText(path)
+        self.lbl_hint.setText("已选择沿用原封面；输出会重新封装，音视频流不重编码。")
+
+    # ------------------------------------------------------------------
+    # 自动带出（需求 3：加入文件后不用再点"读取当前属性"）
+    # ------------------------------------------------------------------
+    def _on_files_changed(self) -> None:
+        super()._on_files_changed()
+        self._autofill_from_current(auto_meta=True)
+        self._sync_batch_notice()
+
+    def _on_current_changed(self, path: str) -> None:
+        super()._on_current_changed(path)
+        self._sync_batch_notice()
+        self._autofill_from_current(auto_meta=not self._meta_touched)
+
+    def _autofill_from_current(self, auto_meta: bool) -> None:
+        """把当前选中文件的属性 / 封面自动带出来（不覆盖用户已改过的内容）。"""
+        path = self.current_first()
+        self._existing_cover = ""
+        self._sync_keep_cover_button()
+        info = self.probe(path) if path else None
+        if not path or info is None or not info.ok:
+            self.lbl_thumb.setText("尚无封面" if not path else "无法解析该文件")
+            self._set_mode_hint()
+            return
+
+        filled = self._fill_tags_from(info) if auto_meta else 0
+        self._refresh_cover_view(info)
+
+        base = self._mode_hint_text()
+        if filled:
+            self.lbl_hint.setText(f"{base}已自动带出 {filled} 项属性，修改后即可开始处理。")
         else:
-            self.lbl_thumb.setPixmap(
-                pixmap.scaled(180, 96, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            )
-        self.schedule_preview()
+            self.lbl_hint.setText(base)
+
+    def _refresh_cover_view(self, info) -> None:
+        """封面预览区的唯一决策点。
+
+        优先级：用户选定的图片 → 文件内嵌的原封面 → 如实说明没有。
+        ``ed_cover.textChanged`` 也走这里，所以无论是点「选择图片…」还是
+        「沿用原封面」，缩略图都跟着变，不会出现"路径有了、预览还是空的"。
+        """
+        chosen = self.ed_cover.text().strip()
+        if chosen and os.path.isfile(chosen):
+            self._show_cover_thumb(chosen)
+            return
+        if chosen:
+            self.lbl_thumb.setText("选中的图片已不存在")
+            return
+        if info is not None and info.ok and info.has_cover:
+            self.lbl_thumb.setText("正在读取原封面…")
+            self._request_existing_cover(self.current_first())
+        else:
+            self.lbl_thumb.setText("该文件没有内嵌封面")
+
+    def _mode_hint_text(self) -> str:
+        cover = (self.cb_mode.currentData() or "cover") == "cover"
+        return (
+            "封面与属性都用无损方式写入（-c copy）：只改文件头，音视频流不重编码。"
+            if cover
+            else "以下内容会原样写入所选文件；留空表示不修改该字段。"
+        )
+
+    def _set_mode_hint(self) -> None:
+        self.lbl_hint.setText(self._mode_hint_text())
+
+    def _fill_tags_from(self, info) -> int:
+        """用 ffprobe 的 tags 回填输入框；不改 chk_clear_empty（那是清除语义开关）。"""
+        tags = {key.lower(): value for key, value in (info.tags or {}).items()}
+        filled = 0
+        for key, edit in self.edits.items():
+            if edit.text().strip():
+                continue      # 用户已经改过，别覆盖
+            value = tags.get(key, "")
+            if value:
+                edit.setText(value)
+                filled += 1
+        return filled
+
+    def _request_existing_cover(self, path: str) -> None:
+        """导出内嵌封面会起一个 ffmpeg 进程 → 必须放后台线程。"""
+        prober = self.ctx.prober
+        temp_dir = os.path.join(tempfile.gettempdir(), "ffkit_cover")
+        token = getattr(self, "_cover_token", 0) + 1
+        self._cover_token = token
+
+        def work():
+            return prober.extract_cover(path, temp_dir)
+
+        def deliver(payload, path=path, token=token) -> None:
+            if token != getattr(self, "_cover_token", 0):
+                return                       # 过期结果：用户已经切到别的文件了
+            if self.current_first() != path:
+                return
+            image = payload[0] or ""
+            if payload[1] is not None or not image:
+                self.lbl_thumb.setText("该文件没有内嵌封面")
+                self._sync_keep_cover_button()
+                return
+            self._existing_cover = image
+            self._show_cover_thumb(image)
+            self._sync_keep_cover_button()
+
+        self.run_in_background(work, deliver)
 
     def _read_current_tags(self) -> None:
+        """手动读取：强制覆盖输入框（与"自动带出"的"不覆盖已改内容"不同）。"""
         path = self.current_first()
         info = self.probe(path)
         if not info or not info.ok:
@@ -242,11 +437,13 @@ class PropsPage(BasePage):
                 filled += 1
         extra = f"；检测到{'有' if info.has_cover else '没有'}封面图" if info.has_video or info.has_audio else ""
         self.lbl_hint.setText(f"已从 {os.path.basename(path)} 读取 {filled} 项属性{extra}。")
+        self._autofill_from_current(auto_meta=False)
 
     def _clear_fields(self) -> None:
         for edit in self.edits.values():
             edit.clear()
         self.chk_clear_empty.setChecked(False)
+        self._meta_touched = True
 
     # ------------------------------------------------------------------
     def can_run(self) -> tuple[bool, str]:

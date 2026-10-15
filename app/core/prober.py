@@ -253,17 +253,33 @@ def list_tracks(info: MediaInfo) -> list[TrackInfo]:
     return [_stream_track(st, i) for i, st in enumerate(info.streams or [])]
 
 
+def cover_stream_index(info: MediaInfo | None) -> int | None:
+    """封面流（attached_pic）的全局流索引；找不到返回 None。
+
+    -map 0:<index> 可直接用它取出封面流。
+    builder 的"移除封面"与 prober 的"导出封面"共用这一份判定，避免两处逻辑漂移。
+    """
+    if info is None:
+        return None
+    for i, st in enumerate(info.streams or []):
+        if st.get("codec_type") == "video" and (st.get("disposition") or {}).get("attached_pic"):
+            return i
+    return None
+
+
 class Prober:
     """ffprobe 包装。ffprobe 路径可动态设置（用户在设置里手改）。"""
 
-    def __init__(self, ffprobe_path: str | None = None) -> None:
+    def __init__(self, ffprobe_path: str | None = None, ffmpeg_path: str | None = None) -> None:
         self.ffprobe_path = ffprobe_path or ""
+        self.ffmpeg_path = ffmpeg_path or ""
         self._cache: dict[tuple, MediaInfo] = {}
         self._kf_cache: dict[tuple, list[float]] = {}
 
-    def set_path(self, ffprobe_path: str | None) -> None:
-        if ffprobe_path != self.ffprobe_path:
+    def set_path(self, ffprobe_path: str | None, ffmpeg_path: str | None = None) -> None:
+        if ffprobe_path != self.ffprobe_path or ffmpeg_path != self.ffmpeg_path:
             self.ffprobe_path = ffprobe_path or ""
+            self.ffmpeg_path = ffmpeg_path or ""
             self.clear()
 
     def clear(self) -> None:
@@ -443,6 +459,50 @@ class Prober:
         self._kf_cache[key] = times
         return times
 
+    # ---------- 内嵌封面 ----------
+    def extract_cover(self, path: str, dest_dir: str, timeout: float = 60.0) -> str:
+        """把文件里内嵌的封面（attached_pic）导出成一张图片，返回其路径。
+
+        没有内嵌封面、缺少 ffmpeg 或导出失败时返回空字符串。
+        这是**同步阻塞**调用（要起一个 ffmpeg 进程），UI 里必须放后台线程跑。
+
+        为什么不用 ffprobe 直接拿字节：ffprobe 能定位封面流，但要真正拿到
+        图片数据仍然要解码一次；统一用 ffmpeg 导出，顺便统一缩放到
+        预览需要的尺寸，大文件不会把内存吃满。
+        """
+        if not path or not os.path.isfile(path):
+            return ""
+        if not self.ffmpeg_path or not os.path.isfile(self.ffmpeg_path):
+            return ""
+        info = self.get(path)
+        if not info.ok or not info.has_cover:
+            return ""
+        index = cover_stream_index(info)
+        if index is None:
+            return ""
+        os.makedirs(dest_dir, exist_ok=True)
+        dest = os.path.join(
+            dest_dir, f"{os.path.splitext(os.path.basename(path))[0]}_cover.jpg"
+        )
+        argv = [
+            self.ffmpeg_path, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+            "-i", path,
+            "-map", f"0:{index}",
+            "-frames:v", "1",
+            "-vf", "scale=600:-2",
+            "-f", "image2",
+            dest,
+        ]
+        code, _out, _err = run_capture(argv, timeout=timeout)
+        if code != 0 or not os.path.isfile(dest) or os.path.getsize(dest) == 0:
+            try:
+                if os.path.isfile(dest):
+                    os.remove(dest)
+            except OSError:
+                pass
+            return ""
+        return dest
+
 
 def _to_int(value: Any) -> int:
     try:
@@ -458,4 +518,4 @@ def _to_float(value: Any) -> float:
         return 0.0
 
 
-__all__ = ["MediaInfo", "ProbeError", "Prober", "TrackInfo", "list_tracks"]
+__all__ = ["MediaInfo", "ProbeError", "Prober", "TrackInfo", "cover_stream_index", "list_tracks"]

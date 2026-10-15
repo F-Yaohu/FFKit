@@ -31,6 +31,7 @@ from ...core.paths import (
     default_audio_codec,
 )
 from ...core.spec import OP_CONVERT, OperationSpec
+from ..widgets.audio_bitrate import AudioBitrate, LOSSLESS_CODECS
 from ..widgets.video_params import VideoParams
 from .base_page import BasePage
 
@@ -88,10 +89,8 @@ class ConvertPage(BasePage):
         self.lbl_acodec = _right_label("音频编码")
         audio_form.addRow(self.lbl_acodec, self.cb_acodec)
 
-        self.sp_abitrate = QSpinBox()
-        self.sp_abitrate.setRange(32, 512)
-        self.sp_abitrate.setValue(192)
-        self.sp_abitrate.setSuffix(" kbps")
+        self.sp_abitrate = AudioBitrate(default=192)
+        self.sp_abitrate.changed.connect(self._on_changed)
         self.lbl_abitrate = _right_label("音频码率")
         audio_form.addRow(self.lbl_abitrate, self.sp_abitrate)
 
@@ -127,7 +126,6 @@ class ConvertPage(BasePage):
         self.cb_container.currentIndexChanged.connect(self._on_container_changed)
         for widget in (self.cb_acodec, self.cb_rotate):
             widget.currentIndexChanged.connect(self._on_changed)
-        self.sp_abitrate.valueChanged.connect(self._on_changed)
         self.sp_volume.valueChanged.connect(self._on_changed)
         self.video.changed.connect(self._on_changed)
         self._on_container_changed()
@@ -168,11 +166,25 @@ class ConvertPage(BasePage):
             widget.setVisible(not audio_only)
         self._set_form_visible(self._rotate_form, not audio_only)
 
-        # 无损 / FLAC / PCM 不需要码率
+        # 无损 / FLAC / PCM / 保持原样 都不需要码率
         codec = self.cb_acodec.currentData() or ""
-        show_bitrate = not audio_only or codec in ("aac", "mp3", "opus", "vorbis")
+        show_bitrate = codec not in LOSSLESS_CODECS
+        # 标签行在不需要时整体收起；组件内部换成一句"为什么不需要"的说明，
+        # 否则用户会以为功能丢了
         self.lbl_abitrate.setVisible(show_bitrate)
-        self.sp_abitrate.setVisible(show_bitrate)
+        if show_bitrate:
+            self.sp_abitrate.setVisible(True)
+            self.sp_abitrate.clear_note()
+        else:
+            reason = {
+                "copy": "音频保持原样（不重编码），码率由源文件决定。",
+                "none": "输出不含音轨，无需设置码率。",
+                "pcm": "PCM 为未压缩音频，不存在码率设置。",
+                "flac": "FLAC 为无损压缩，不存在码率设置。",
+                "alac": "ALAC 为无损压缩，不存在码率设置。",
+            }.get(codec, "该编码不需要设置码率。")
+            self.sp_abitrate.set_visible_controls(False)
+            self.sp_abitrate.set_note(reason)
         self.lbl_acodec.setVisible(True)
         self.cb_acodec.setVisible(True)
         self._on_changed()

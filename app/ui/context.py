@@ -29,7 +29,7 @@ class AppContext:
     def create(cls, cfg: Config, theme: str) -> "AppContext":
         ctx = cls(cfg=cfg, theme=theme)
         ctx.builder.prober = ctx.prober
-        ctx.prober.set_path(ctx.toolchain.ffprobe)
+        ctx.prober.set_path(ctx.toolchain.ffprobe, ctx.toolchain.ffmpeg)
         ctx.refresh_toolchain()
         out_dir = str(cfg.get("output_dir") or "")
         if not out_dir or not os.path.isdir(out_dir):
@@ -51,7 +51,7 @@ class AppContext:
         if ffprobe and not os.path.isfile(ffprobe):
             ffprobe = ""
         self.toolchain = locate(ffmpeg, ffprobe)
-        self.prober.set_path(self.toolchain.ffprobe)
+        self.prober.set_path(self.toolchain.ffprobe, self.toolchain.ffmpeg)
         # builder 需要 prober 才能判断"能否无损合并""智能切割是否可行"等
         self.builder.prober = self.prober
         self.builder.ffmpeg_path = self.toolchain.ffmpeg or "ffmpeg"

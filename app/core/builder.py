@@ -21,7 +21,7 @@ from .paths import (
     muxer_format_for,
     write_concat_list,
 )
-from .prober import MediaInfo, Prober, list_tracks
+from .prober import MediaInfo, Prober, cover_stream_index, list_tracks
 from .spec import (
     Job,
     OP_COMPRESS,
@@ -790,6 +790,17 @@ class CommandBuilder:
     # 4. 提取
     # ------------------------------------------------------------------
     def _build_extract_audio(self, spec: OperationSpec) -> Job:
+        """提取音频，可选写入封面（需求 4）。
+
+        封面来源（``cover_mode``）：
+        - ``none``不写封面
+        - ``start``  取源视频开头一帧
+        - ``custom``取自定义时间点的一帧
+
+        写封面需要两步：先把那一帧导出成临时图片，再作为第二条输入
+        attach 进音频容器。批量时每个 spec 各带各的时间点与各自的时长，
+        因此每个文件取的是"它自己"的封面。
+        """
         src = spec.inputs[0]
         out = spec.output or ""
         ext = ext_of(out)
@@ -801,37 +812,108 @@ class CommandBuilder:
             raise BuildError("该文件没有音轨，无法提取音频")
 
         src_audio = info.a_codec if info else ""
-        argv = self._base() + ["-i", src, "-vn", "-map", "0:a:0"]
+        abitrate = int(spec.params.get("abitrate_k") or 192)
+        cover_mode = str(spec.params.get("cover_mode") or "none")
+        cover_time = float(spec.params.get("cover_time") or 0.0)
 
+        audio_args: list[str] = []
         if ext == ".m4a":
             if src_audio in ("aac", "alac"):
-                argv += ["-c:a", "copy"]
+                audio_args = ["-c:a", "copy"]
                 notes.append("音轨无损复制（秒级完成）")
             else:
-                argv += self.audio_args(codec="aac", bitrate_k=int(spec.params.get("abitrate_k") or 192))
+                audio_args = self.audio_args(codec="aac", bitrate_k=abitrate)
                 warnings.append(f"源音频为 {src_audio}，无法放入 m4a，已改为 AAC 重编码")
         elif ext == ".aac":
             if src_audio == "aac":
-                argv += ["-c:a", "copy"]
+                audio_args = ["-c:a", "copy"]
                 notes.append("音轨无损复制（秒级完成）")
             else:
-                argv += self.audio_args(codec="aac", bitrate_k=int(spec.params.get("abitrate_k") or 192))
+                audio_args = self.audio_args(codec="aac", bitrate_k=abitrate)
                 warnings.append(f"源音频为 {src_audio}，已改为 AAC 重编码")
         elif ext == ".mp3":
-            argv += self.audio_args(codec="mp3", bitrate_k=int(spec.params.get("abitrate_k") or 192))
+            audio_args = self.audio_args(codec="mp3", bitrate_k=abitrate)
         elif ext == ".wav":
-            argv += self.audio_args(codec="wav")
+            audio_args = self.audio_args(codec="wav")
         elif ext == ".flac":
-            argv += self.audio_args(codec="flac")
+            audio_args = self.audio_args(codec="flac")
         elif ext in (".ogg", ".oga", ".opus"):
-            argv += self.audio_args(codec="opus" if ext == ".opus" else "vorbis",
-                                    bitrate_k=int(spec.params.get("abitrate_k") or 160))
+            audio_args = self.audio_args(
+                codec="opus" if ext == ".opus" else "vorbis",
+                bitrate_k=int(spec.params.get("abitrate_k") or 160),
+            )
         else:
-            argv += ["-c:a", "copy"] if self._audio_copyable(muxer_format_for(out), src_audio) \
+            audio_args = ["-c:a", "copy"] if self._audio_copyable(muxer_format_for(out), src_audio) \
                 else self.audio_args(codec="aac", bitrate_k=192)
 
-        step = self._make_step(argv, out, "提取音频", spec.duration)
-        return Job(spec=spec, steps=[step], final_output=out, warnings=warnings, notes=notes)
+        # ---------------- 不写封面：一段搞定 ----------------
+        if cover_mode == "none":
+            argv = self._base() + ["-i", src, "-vn", "-map", "0:a:0"] + audio_args
+            step = self._make_step(argv, out, "提取音频", spec.duration)
+            return Job(spec=spec, steps=[step], final_output=out,
+                       warnings=warnings, notes=notes)
+
+        # ---------------- 写封面：先抽帧，再 attach ----------------
+        if info is None or not info.has_video:
+            raise BuildError("该文件没有视频画面，取不到封面；请关闭「添加封面」或换一个视频文件")
+        if cover_mode not in ("start", "custom"):
+            raise BuildError(f"未知的封面来源：{cover_mode}")
+
+        when = 0.0
+        if cover_mode == "custom":
+            when = max(0.0, cover_time)
+        # 逐文件做边界检查：批量时短文件不能因为共用一个时间点而取不到帧
+        if info.duration and when >= info.duration - 0.05:
+            when = max(0.0, info.duration - 0.05)
+            notes.append(
+                f"封面时间点超出该文件总时长（{info.duration:.2f} 秒），"
+                "已改为取结尾前一帧。"
+            )
+
+        work_dir = os.path.dirname(os.path.abspath(out)) or os.getcwd()
+        tag = f"{os.getpid()}_{abs(hash(os.path.abspath(out))) % 100000}"
+        frame_png = os.path.join(work_dir, f".ffkit_accover_{tag}.png")
+
+        # 第 1 步：抽出封面帧（限制边长，避免异常宽高的图把文件撑大）
+        frame_argv = self._base() + ["-ss", _sec(when), "-i", src]
+        frame_argv += ["-frames:v", "1", "-vf", "scale=1000:-2", "-f", "image2", frame_png]
+        steps = [Step(
+            argv=frame_argv,
+            label=f"抽取封面帧（{when:.2f}s）",
+            duration=0.0,
+            temp_out=frame_png,
+        )]
+
+        # 第 2 步：正常提音频，并把封面图 attach 进去
+        if ext == ".wav":
+            # WAV 只有 fmt/data 块，塞不进图片流 → 明确降级为不写封面
+            steps[0].cleanup = [frame_png]
+            warnings.append("WAV 格式无法写入封面图，已改为只提取音频")
+            argv = self._base() + ["-i", src, "-vn", "-map", "0:a:0"] + audio_args
+            steps.append(self._make_step(argv, out, "提取音频", spec.duration))
+            return Job(spec=spec, steps=steps, final_output=out,
+                       warnings=warnings, notes=notes)
+
+        # 注意：这里刻意不加 -vn。加了 -vn 等于"不记录视频流"，
+        # 附加封面图（attached_pic）本身是一条视频流，会被一起丢掉。
+        # 只用 -map 0:a:0 限定"只取源文件的音轨"即可。
+        argv = self._base() + ["-i", src, "-i", frame_png,
+                               "-map", "0:a:0", "-map", "1:v:0"]
+        argv += audio_args
+        if ext == ".mp3":
+            # mp3 走 ID3 attached_pic（图片流直接复制，不重编码）
+            argv += ["-c:v", "copy", "-id3v2_version", "3",
+                     "-metadata:s:v", "title=Album cover",
+                     "-metadata:s:v", "comment=Cover (front)"]
+            notes.append("封面已写入 ID3（mp3 内嵌封面）。")
+        else:
+            # m4a/aac/flac 等：统一转 mjpeg 当附加图片流，与属性页写入行为一致
+            argv += ["-c:v", "mjpeg", "-disposition:v:0", "attached_pic"]
+            notes.append(f"封面已写入 {ext.lstrip('.')} 容器的附加图片流。")
+        steps.append(self._make_step(argv, out, "提取音频并写入封面", spec.duration,
+                                     cleanup=[frame_png]))
+        return Job(spec=spec, steps=steps, final_output=out,
+                   warnings=warnings, notes=notes)
 
     def _build_strip_audio(self, spec: OperationSpec) -> Job:
         src = spec.inputs[0]
@@ -1268,13 +1350,11 @@ class CommandBuilder:
 # 小工具
 # ---------------------------------------------------------------------------
 def _attached_pic_index(info: MediaInfo | None) -> int | None:
-    """封面流（attached_pic）的全局流索引；找不到返回 None。"""
-    if info is None:
-        return None
-    for i, st in enumerate(info.streams or []):
-        if st.get("codec_type") == "video" and st.get("disposition", {}).get("attached_pic"):
-            return i
-    return None
+    """封面流（attached_pic）的全局流索引；找不到返回 None。
+
+    判定逻辑统一放在 prober.cover_stream_index，UI 侧导出封面用的是同一份。
+    """
+    return cover_stream_index(info)
 
 
 def _sec(value: float) -> str:

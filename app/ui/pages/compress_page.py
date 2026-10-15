@@ -30,6 +30,7 @@ from ...core.paths import (
 )
 from ...core.spec import OP_COMPRESS, OperationSpec
 from ...core.timeparse import human_bitrate, human_size
+from ..widgets.audio_bitrate import AudioBitrate, LOSSLESS_CODECS
 from ..widgets.video_params import VideoParams
 from .base_page import BasePage
 
@@ -125,10 +126,7 @@ class CompressPage(BasePage):
         self.lbl_acodec = _right_label("音频编码")
         audio_form.addRow(self.lbl_acodec, self.cb_acodec)
 
-        self.sp_abitrate = QSpinBox()
-        self.sp_abitrate.setRange(32, 512)
-        self.sp_abitrate.setValue(128)
-        self.sp_abitrate.setSuffix(" kbps")
+        self.sp_abitrate = AudioBitrate(default=128)
         self.lbl_abitrate = _right_label("音频码率")
         audio_form.addRow(self.lbl_abitrate, self.sp_abitrate)
         layout.addLayout(audio_form)
@@ -148,7 +146,7 @@ class CompressPage(BasePage):
             widget.currentIndexChanged.connect(self._on_param_changed)
         self.video.changed.connect(self._on_param_changed)
         self.sp_target.valueChanged.connect(self._on_param_changed)
-        self.sp_abitrate.valueChanged.connect(self._on_param_changed)
+        self.sp_abitrate.changed.connect(self._on_param_changed)
         self._on_target_changed()
 
     # ------------------------------------------------------------------
@@ -207,10 +205,18 @@ class CompressPage(BasePage):
         self._fill_audio_codecs()
         muxer = self._container_muxer(self._container_ext())
         codec = self.cb_acodec.currentData() or ""
-        # PCM / FLAC 无损，码率无意义
-        show_rate = codec in ("aac", "mp3", "opus", "vorbis", "ac3")
+        # 无损编码没有码率可言，但要把原因讲清楚，别让用户以为功能丢了
+        show_rate = codec not in LOSSLESS_CODECS
         self.lbl_abitrate.setVisible(show_rate)
-        self.sp_abitrate.setVisible(show_rate)
+        if show_rate:
+            self.sp_abitrate.clear_note()
+            self.sp_abitrate.setVisible(True)
+        else:
+            self.sp_abitrate.set_visible_controls(False)
+            self.sp_abitrate.set_note(
+                "FLAC / WAV 为无损编码，不存在码率设置；音频压缩请改用 MP3 或 M4A。"
+            )
+            self.sp_abitrate.setVisible(True)
         if codec and muxer == "mp4" and codec not in ("aac", "copy"):
             self.set_notice("MP4 容器只建议使用 AAC 音轨，已自动切换到 AAC。", "warn")
         else:
